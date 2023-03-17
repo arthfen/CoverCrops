@@ -1,7 +1,3 @@
-// Supplementary Material - From regional to parcel scale: a high-resolution map of cover crops across Europe combining satellite data with statistical surveys
-// This file contains the C++ auxiliary codes for parameter estimation
-// Author: Arthur Nicolaus Fendrich
-
 #define RCPP_ARMADILLO_RETURN_ANYVEC_AS_VECTOR
 #include <RcppArmadillo.h>
 // [[Rcpp::depends(RcppArmadillo)]]
@@ -35,8 +31,8 @@ double fitCpp(arma::vec rho, const arma::colvec& Qty, const arma::mat& R, const 
 		return arma::datum::inf;
 	}
 
-	arma::mat g0 = R.t()*Qty/rho(0) - Sl*b0; // gradient
-	arma::mat H0 = -V; // approximate Hessian
+	arma::mat g0 = 2*R.t()*Qty/rho(0) - 2*Sl*b0; // gradient
+	arma::mat H0 = -2*V; // approximate Hessian
 	arma::mat hat_beta;
 	try {
 		hat_beta = b0 - solve(H0, g0, arma::solve_opts::likely_sympd + arma::solve_opts::no_approx);
@@ -55,14 +51,14 @@ double fitCpp(arma::vec rho, const arma::colvec& Qty, const arma::mat& R, const 
 }
 
 // [[Rcpp::export]]
-arma::vec hbCpp(arma::vec rho, const arma::colvec& Qty, const arma::mat& R, const arma::mat& RtR, const double& r, const double& N, const arma::vec& b0, const arma::mat& S1, const arma::mat& S2, const arma::mat& S3, const arma::mat& S4, const double& w){
+arma::vec hbCpp(arma::vec rho, const arma::colvec& Qty, const arma::mat& R, const arma::mat& RtR, const double& r, const double& N, const arma::vec& b0, const arma::mat& S1, const arma::mat& S2, const arma::mat& S3, const arma::mat& S4){
 	rho = arma::exp(rho);
 
 	arma::mat Sl = rho(1) * S1 + rho(2) * S2 + rho(3) * S3 + rho(4) * S4;
 	arma::mat V = RtR/rho(0) + Sl;
-	arma::mat g0 = R.t()*Qty/rho(0) - Sl*b0; // gradient
-	arma::mat H0 = -V; // approximate Hessian
-	arma::mat hat_beta = b0 - w * solve(H0, g0, arma::solve_opts::likely_sympd + arma::solve_opts::no_approx);
+	arma::mat g0 = 2*R.t()*Qty/rho(0) - 2*Sl*b0; // gradient
+	arma::mat H0 = -2*V; // approximate Hessian
+	arma::mat hat_beta = b0 - solve(H0, g0, arma::solve_opts::likely_sympd + arma::solve_opts::no_approx);
 
 	return hat_beta;
 }
@@ -95,11 +91,6 @@ arma::uvec getRowIndex_NA(const arma::mat& m){
 
 arma::vec g(arma::vec& x){
 	arma::vec v = 1/(1 + arma::exp(x));
-	return v;
-}
-
-arma::mat gmat(arma::mat& x){
-	arma::mat v = 1/(1 + arma::exp(x));
 	return v;
 }
 
@@ -177,24 +168,94 @@ Rcpp::List tpmm_agg_noblock(const arma::mat& Xs, const arma::mat& Xt, const arma
 }
 
 // [[Rcpp::export]]
-arma::vec tpmm_vec_q_noblock(const arma::mat& Xs, const arma::mat& Xt, const arma::mat& b, const arma::mat& qrQ, int type){
+Rcpp::List tpmm_agg_noblock_SLOW(const arma::mat& Xs, const arma::mat& Xt, const arma::vec& groups, const arma::vec& blocks, const arma::vec& b, const arma::mat& qrQ){
 	int ms = Xs.n_cols;
 	int mt = Xt.n_cols;
 	int m = 1 + ms * mt; // one for the intercept
 
-	int n = Xs.n_rows;
-	int nb = b.n_cols;
+	int n = groups.size();
 
 	bool cstr;
 	if(qrQ.n_rows == 1){
 		cstr = false;
 	} else {
 		cstr = true;
-		Rcout << "ERROR: tpmm_agg_noblock \n";
 	}
 
 	// declare the output vectors
-	arma::mat gzd(n, nb, arma::fill::zeros);
+	arma::vec gzd(n);
+	arma::mat AGX;
+	if(cstr){
+		AGX.zeros(n, m-1);
+	} else {
+		AGX.zeros(n, m);
+	}
+	arma::vec MMt(n);
+
+	// declare the temporary vectors
+	arma::uvec idx;
+	arma::mat X_tmp;
+	arma::mat Xs_tmp;
+	arma::mat Xt_tmp;
+	arma::vec zd_tmp(n);
+	arma::vec gzd_tmp(n);
+	arma::mat AGX_tmp;
+	if(cstr){
+		AGX_tmp.zeros(n, m-1);
+	} else {
+		AGX_tmp.zeros(n, m);
+	}
+	int st;
+
+	for(int i = 0; i != n; i++) {
+		idx = arma::conv_to<arma::uvec>::from(getIndex(blocks, groups[i]));
+		Xs_tmp = Xs.rows(idx);
+		Xt_tmp = Xt.rows(idx);
+
+		X_tmp.ones(idx.size(), m);
+		for(int j = 0; j != ms; j++){
+			st = 1 + j * mt;
+			X_tmp.cols(st, st + mt - 1) = Xs_tmp.col(j) % Xt_tmp.each_col();
+		}
+		if(cstr){ // Apply the constraints, if needed
+/* This is easier but more verbose
+			arma::mat tmp = qrQ * X_tmp.cols(1, m-1).t();
+			tmp.shed_row(0);
+			X_tmp.shed_col(m-1);
+			X_tmp.cols(1, m-2) = tmp.t();
+*/
+			X_tmp.cols(1, m-1) = trans(qrQ * X_tmp.cols(1, m-1).t());
+			X_tmp.shed_col(1);
+		}
+		zd_tmp = X_tmp * b;
+		gzd_tmp = g(zd_tmp);
+		AGX_tmp = dg(zd_tmp) % X_tmp.each_col();
+
+		gzd.row(i) = arma::sum(gzd_tmp);
+		AGX.row(i) = arma::sum(AGX_tmp, 0);
+		MMt.row(i) = idx.size();
+	}
+
+	return Rcpp::List::create(Rcpp::Named("gz.") = gzd, Rcpp::Named("AGX") = AGX, Rcpp::Named("MMt") = MMt);
+}
+
+// [[Rcpp::export]]
+arma::vec tpmm_vec_noblock(const arma::mat& Xs, const arma::mat& Xt, const arma::vec& b, const arma::mat& qrQ){
+	int ms = Xs.n_cols;
+	int mt = Xt.n_cols;
+	int m = 1 + ms * mt; // one for the intercept
+
+	int n = Xs.n_rows;
+
+	bool cstr;
+	if(qrQ.n_rows == 1){
+		cstr = false;
+	} else {
+		cstr = true;
+	}
+
+	// declare the output vectors
+	arma::vec gzd(n, arma::fill::zeros);
 
 	// declare the temporary vectors
 	arma::mat X_tmp;
@@ -204,29 +265,18 @@ arma::vec tpmm_vec_q_noblock(const arma::mat& Xs, const arma::mat& Xt, const arm
 	X_tmp.ones(n, mt);
 	for(int j = 0; j != ms; j++){
 		X_tmp = Xs.col(j) % Xt.each_col();
+		if(cstr){ // Apply constraint - untested
+			X_tmp.cols(0, mt-1) = trans(qrQ * X_tmp.cols(0, mt-1).t());
+			X_tmp.shed_col(0);
+		}
 		st = 1 + j * mt;
 		gzd += X_tmp * b.rows(st, st + mt - 1);
 	}
-	gzd.each_row() += b.row(0); // intercept
-	gzd = gmat(gzd);
+	gzd += arma::as_scalar(b.row(0)); // intercept
+	gzd = g(gzd);
 
-	arma::vec out;
-	if(type == 0){
-		arma::vec P_005 = {0.50};
-		out = arma::quantile(gzd, P_050, 1);
-	} if(type == 1){
-		out = arma::stddev(gzd, 0, 1);
-	} else if(type == 2){
-		arma::vec P_005 = {0.05};
-		out = arma::quantile(gzd, P_005, 1);
-	} else if(type == 3){
-		arma::vec P_095 = {0.95};
-		out = arma::quantile(gzd, P_095, 1);
-	}	
-
-	return out;
+	return gzd;
 }
-
 
 // [[Rcpp::export]]
 Rcpp::List qrCpp(const arma::mat& m){
